@@ -1,0 +1,68 @@
+import requests
+import json
+from openai import OpenAI
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+#*********Step1: Create a function to get the weather*********
+# The function will take latitude and longitude as input and return the current temperature in celsius.
+def get_weather(latitude, longitude):
+    response = requests.get(f"https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current=temperature_2m,wind_speed_10m&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m")
+    data = response.json()
+    return data['current']['temperature_2m']
+
+#*********Step2: Call model with functions defined – along with your system and user messages.********
+get_weather_schema = {
+        "type": "function",
+        "name": "get_weather",
+        "description": "Get current temperature for provided coordinates in celsius.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "latitude": {"type": "number"},
+                "longitude": {"type": "number"}
+            },
+            "required": ["latitude", "longitude"],
+            "additionalProperties": False
+        },
+        "strict": True
+    }
+
+tools = [get_weather_schema]
+
+input_messages = [{"role": "user", "content": "What's the best clothing based on weather in Paris today?"}]
+response = client.responses.create(
+    model="gpt-6-luna",
+    input=input_messages,
+    tools=tools
+)
+input_messages += response.output  # append model's function call item
+
+#*********Step3: Model decides to call function(s) – model returns the name and input arguments.*********
+# Extract the arguments from the function
+tool_call = next(item for item in response.output if item.type == "function_call")
+args = json.loads(tool_call.arguments)
+print(tool_call.name)
+print(args)
+
+#********Step 4: Execute function code – parse the model's response and handle function calls.*********
+result = get_weather(args["latitude"], args["longitude"])
+
+#********Step 5: Supply model with results – so it can incorporate them into its final response.*********
+input_messages.append({   # append result message
+    "type": "function_call_output",
+    "call_id": tool_call.call_id,
+    "output": str(result)
+})
+
+response_2 = client.responses.create(
+    model="gpt-6-luna",
+    input=input_messages,
+    tools=tools,
+)
+
+print(response_2.output_text)

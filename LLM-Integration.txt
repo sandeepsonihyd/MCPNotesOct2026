@@ -1,0 +1,73 @@
+import asyncio
+import json
+import os
+import sys
+
+from dotenv import load_dotenv
+from openai import OpenAI
+
+from mcp import Client, StdioServerParameters
+load_dotenv()                                    # reads OPENAI_API_KEY from .env
+MODEL = os.getenv("OPENAI_MODEL", "gpt-6-luna")  # change the model in one place
+openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+def to_openai_tools(mcp_tools):
+    """Convert MCP tool definitions to OpenAI Responses API function tools."""
+    return [
+        {
+            "type": "function",
+            "name": tool.name,
+            "description": tool.description or "",
+            "parameters": tool.input_schema,   # MCP inputSchema is plain JSON Schema
+            "strict": False,                   # SDK schemas are not strict-mode schemas
+        }
+        for tool in mcp_tools
+    ]
+
+
+async def main():
+    params = StdioServerParameters(command=sys.executable, args=["server.py"])
+    async with Client(params) as client:
+        # 1. Fetch tools from the MCP server and convert them
+        tools = to_openai_tools((await client.list_tools()).tools)
+
+        # 2. Send the user message to OpenAI with the tools available
+        messages = [
+            {
+                "role": "system", 
+                "content": """You are a helpful math assistant. 
+                                         Don't use your knowlege of math directly. 
+                                         Always rely on the available tools. 
+                                         Use the add, subtract, multiply and divide tools to answer math questions.
+                                         """
+            },
+            {"role": "user", "content": "What is 5 + 3?"},
+        ]
+        response = openai_client.responses.create(model=MODEL, input=messages, tools=tools)
+
+        # 3. Execute every tool call the model asked for via MCP
+        outputs = []
+        for item in response.output:
+            if item.type == "function_call":
+                args = json.loads(item.arguments)
+                print(f"LLM called '{item.name}' with args: {args}")
+                result = await client.call_tool(item.name, args)
+                outputs.append({
+                    "type": "function_call_output",
+                    "call_id": item.call_id,
+                    "output": result.content[0].text if result.content else "",
+                })
+
+        # 4. Send all tool results back in ONE request for the final answer
+        if outputs:
+            final = openai_client.responses.create(
+                model=MODEL, 
+                previous_response_id=response.id, 
+                input=outputs, 
+                tools=tools
+            )
+            print("Final answer:", final.output_text)
+        else:
+            print("Final answer:", response.output_text)
+
+asyncio.run(main())
